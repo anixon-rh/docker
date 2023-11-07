@@ -1,0 +1,85 @@
+FROM registry.redhat.io/rhel8/postgresql-12:latest
+
+####
+# Technical debt:
+#
+# - Can we smoosh some of these layers together? (e.g., the repo downloads, mkdir/ln, etc.)
+# - Get rid of --nogpgcheck by importing the appropriate keys
+####
+
+USER root
+
+#### Create dirs and symlinks to allow install of PostGIS 3.3 on UBI8 Postgres container ####
+
+## Files placed in /usr/pgsql-12/lib will end up in /usr/lib64/pgsql
+RUN mkdir /usr/pgsql-12 \
+        && ln -s \
+               /usr/lib64/pgsql \
+               /usr/pgsql-12/lib
+
+RUN mkdir /usr/pgsql-12/share \
+        && ln -s \
+               /usr/share/pgsql/extension \
+               /usr/pgsql-12/share/extension
+
+## Files placed in /usr/pgsql-12/share/contrib/postgis-3.3 will end up in /usr/share/pgsql/contrib/postgis-3.3
+RUN mkdir /usr/share/pgsql/contrib/postgis-3.3 \
+        && mkdir -p /usr/pgsql-12/share/contrib \
+        && ln -s \
+               /usr/share/pgsql/contrib/postgis-3.3 \
+               /usr/pgsql-12/share/contrib/postgis-3.3
+
+#### Install repos via RPM ####
+
+## Need EPEL Release for certain PostGIS dependencies
+RUN dnf install -y https://dl.fedoraproject.org/pub/epel/epel-release-latest-8.noarch.rpm
+
+## The pgdg repo contains PostGIS, and certain dependencies not in codeready builder repo
+RUN dnf install -y --nogpgcheck \
+        https://download.postgresql.org/pub/repos/yum/reporpms/EL-8-x86_64/pgdg-redhat-repo-latest.noarch.rpm
+
+#### Install PostGIS dependencies, excluding Postgres 12 ####
+RUN dnf install -y \
+      gdal36-libs \
+      SFCGAL \
+        --nogpgcheck `# FIXME: Need to import the GPG keys properly` \
+        --setopt=pgdg12.module_hotfixes=true `# https://dnf.readthedocs.io/en/latest/modularity.html#hotfix-repositories` \
+        --enablerepo=codeready-builder-for-rhel-8-x86_64-rpms \
+        --disablerepo=pgdg11 \
+        --disablerepo=pgdg13 \
+        --disablerepo=pgdg14 \
+        --disablerepo=pgdg15 \
+        --disablerepo=pgdg16
+
+#### Install PostGIS manually, without Postgres 12 dependency ####
+RUN dnf -y download postgis33_12 \
+        --destdir /tmp \
+        --nogpgcheck `# FIXME: Need to import the GPG keys properly` \
+        --enablerepo=codeready-builder-for-rhel-8-x86_64-rpms \
+        --disablerepo=pgdg11 \
+        --disablerepo=pgdg13 \
+        --disablerepo=pgdg14 \
+        --disablerepo=pgdg15 \
+        --disablerepo=pgdg16 \
+    && rpm -ivh --nodeps /tmp/postgis*.rpm
+
+#### Enable pgaudit, don't judge me
+#RUN sed -i "s/#shared_preload_libraries = ''/shared_preload_libraries = 'pg_audit'/g" /var/lib/pgsql/data/userdata/postgresql.conf
+
+#### Install PostGIS with all dependencies####
+
+## Install PostGIS, with hotfixes allowed; disable unnecessary postgres repos
+## NOTE: This method does NOT prevent the second postgres12 installation
+#RUN dnf -y install postgis33_12 \
+#        --nogpgcheck `# FIXME: Need to import the GPG keys properly` \
+#        --setopt=pgdg12.module_hotfixes=true `# https://dnf.readthedocs.io/en/latest/modularity.html#hotfix-repositories` \
+#        --enablerepo=codeready-builder-for-rhel-8-x86_64-rpms \
+#        --disablerepo=pgdg11 \
+#        --disablerepo=pgdg13 \
+#        --disablerepo=pgdg14 \
+#        --disablerepo=pgdg15 \
+#        --disablerepo=pgdg16
+
+USER postgres
+
+CMD ["run-postgresql", "-c", "shared_preload_libraries=pgaudit"]
